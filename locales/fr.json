@@ -86,5 +86,18 @@
   "saveEdit": "Save",
   "cancelEdit": "Cancel",
   "edited": "edited",
-  "voiceMenu": "Voice"
+  "voiceMenu": "Voice",
+  "roomDetails": "Room details",
+  "roomCreated": "Created",
+  "roomMemberCount": "Total members",
+  "roomMemberNames": "Member names",
+  "roomCreatedBy": "Created by",
+  "liveVoiceCall": "Live voice call",
+  "muteMic": "Mute",
+  "unmuteMic": "Unmute",
+  "leaveCall": "Leave",
+  "voiceCallConnecting": "Connecting to voice call…",
+  "voiceCallUnsupported": "Live voice calls are not supported in this browser.",
+  "voiceCallNeedServer": "Connect to the chat server first.",
+  "joinRoomFirst": "Join a room first."
 }

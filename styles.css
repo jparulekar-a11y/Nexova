@@ -668,6 +668,10 @@ body[data-lang="pa"] { font-family: var(--font-gurmukhi), var(--font-sans); }
   position: relative;
 }
 
+.chat-area[hidden] {
+  display: none !important;
+}
+
 .chat-header {
   padding: 14px 20px;
   background: var(--bg-secondary);
@@ -718,16 +722,49 @@ body[data-lang="pa"] { font-family: var(--font-gurmukhi), var(--font-sans); }
 }
 
 .room-members-dialog {
-  width: 100%;
-  max-width: 380px;
-  max-height: min(70vh, 420px);
-  display: flex;
-  flex-direction: column;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  overflow: auto;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 14px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-  overflow: hidden;
+  box-shadow: var(--shadow);
+  outline: none;
+}
+
+.room-details-meta {
+  padding: 4px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.room-details-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.room-details-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.room-details-value {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-word;
+}
+
+.room-details-subtitle {
+  margin: 12px 16px 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
 }
 
 .room-members-header {
@@ -1110,6 +1147,156 @@ mark.msg-search-highlight {
 .voice-menu-label {
   display: block;
 }
+
+.voice-call-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+}
+
+.voice-call-overlay[hidden] {
+  display: none !important;
+}
+
+.voice-call-panel {
+  width: min(520px, 100%);
+  max-height: min(80vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 20px 18px;
+  border-radius: 18px;
+  background: linear-gradient(160deg, #1a222c 0%, #121820 55%, #0e141c 100%);
+  border: 1px solid rgba(0, 200, 180, 0.35);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(56, 140, 255, 0.15);
+}
+
+.voice-call-header {
+  text-align: center;
+}
+
+.voice-call-title {
+  margin: 0 0 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-secondary, #9aa8b5);
+  letter-spacing: 0.02em;
+}
+
+.voice-call-timer {
+  font-size: 1.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #5eead4;
+  text-shadow: 0 0 18px rgba(45, 212, 191, 0.35);
+}
+
+.voice-call-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  overflow-y: auto;
+  padding: 4px 2px 8px;
+  min-height: 140px;
+}
+
+.voice-call-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(56, 140, 255, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(94, 234, 212, 0.12);
+}
+
+.voice-call-tile.is-self {
+  border-color: rgba(94, 234, 212, 0.55);
+}
+
+.voice-call-tile.is-muted .voice-call-avatar {
+  opacity: 0.55;
+}
+
+.voice-call-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: #0b1220;
+  background: radial-gradient(circle at 30% 25%, #7ef0d8, #2dd4bf 45%, #38bdf8 100%);
+  box-shadow: 0 0 0 3px rgba(56, 140, 255, 0.35);
+}
+
+.voice-call-name {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-primary, #e8eef4);
+  text-align: center;
+  word-break: break-word;
+}
+
+.voice-call-you {
+  font-weight: 500;
+  opacity: 0.7;
+  font-size: 0.8rem;
+}
+
+.voice-call-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.voice-call-action {
+  min-width: 110px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.voice-call-mute {
+  background: rgba(56, 140, 255, 0.15);
+  border-color: rgba(56, 140, 255, 0.45);
+  color: #cfe8ff;
+}
+
+.voice-call-mute[aria-pressed="true"] {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #fecaca;
+}
+
+.voice-call-leave {
+  background: rgba(239, 68, 68, 0.9);
+  color: #fff;
+}
+
+.voice-call-action:hover {
+  transform: translateY(-1px);
+}
+
+.composer-voice-btn.in-call {
+  box-shadow: 0 0 0 2px rgba(94, 234, 212, 0.7);
+  color: #5eead4;
+}
+
 
 .mute-room-btn {
   width: 40px;

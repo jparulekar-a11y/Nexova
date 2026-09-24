@@ -7,6 +7,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 const mongoose = require('mongoose');
 
 const app = express();
@@ -20,10 +21,70 @@ app.use(express.json());
 
 // Presence map + members API MUST be registered before express.static so /api/room/... is never shadowed.
 const users = new Map();
-/** In-memory fallback when MongoDB is unavailable (dev / broken Atlas credentials). */
+/** In-memory + disk fallback when MongoDB is unavailable (dev / broken Atlas credentials). */
 const memoryMessages = new Map(); // roomId -> msg[]
 const memoryEmails = new Map(); // userName -> email
 const memoryReports = []; // { roomId, messageId, reporter, reason, time }
+const memoryRoomMeta = new Map(); // roomId -> { createdAt, createdBy }
+const ROOM_META_ID = '__room_meta__';
+const RESERVED_COLLECTIONS = new Set(['emails', 'reports', 'room_members']);
+
+const DATA_DIR = path.join(__dirname, 'data');
+const STORE_PATH = path.join(DATA_DIR, 'nexova-store.json');
+let storeSaveTimer = null;
+
+function loadDiskStore() {
+  try {
+    if (!fs.existsSync(STORE_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
+    const rooms = raw && raw.rooms && typeof raw.rooms === 'object' ? raw.rooms : {};
+    for (const [roomId, entry] of Object.entries(rooms)) {
+      const id = String(roomId || '').trim();
+      if (!id) continue;
+      if (entry && entry.meta && entry.meta.createdAt) {
+        memoryRoomMeta.set(id, {
+          createdAt: entry.meta.createdAt,
+          createdBy: String(entry.meta.createdBy || '').trim(),
+        });
+      }
+      if (entry && Array.isArray(entry.messages) && entry.messages.length) {
+        memoryMessages.set(id, entry.messages.slice(-500));
+      }
+    }
+    const emails = raw && raw.emails && typeof raw.emails === 'object' ? raw.emails : {};
+    for (const [name, email] of Object.entries(emails)) {
+      if (name && email) memoryEmails.set(String(name), String(email));
+    }
+    console.log(`Loaded local store: ${Object.keys(rooms).length} room(s) from ${STORE_PATH}`);
+  } catch (err) {
+    console.error('Failed to load local store:', err.message);
+  }
+}
+
+function saveDiskStoreSoon() {
+  if (storeSaveTimer) clearTimeout(storeSaveTimer);
+  storeSaveTimer = setTimeout(() => {
+    storeSaveTimer = null;
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      const rooms = {};
+      const roomIds = new Set([...memoryMessages.keys(), ...memoryRoomMeta.keys()]);
+      for (const id of roomIds) {
+        rooms[id] = {
+          meta: memoryRoomMeta.get(id) || null,
+          messages: memoryMessages.get(id) || [],
+        };
+      }
+      const emails = {};
+      for (const [name, email] of memoryEmails.entries()) emails[name] = email;
+      fs.writeFileSync(STORE_PATH, JSON.stringify({ rooms, emails }, null, 0), 'utf8');
+    } catch (err) {
+      console.error('Failed to save local store:', err.message);
+    }
+  }, 250);
+}
+
+loadDiskStore();
 
 function memoryPushMessage(roomId, msg) {
   const id = String(roomId || '').trim();
@@ -32,11 +93,120 @@ function memoryPushMessage(roomId, msg) {
   memoryMessages.get(id).push(msg);
   const list = memoryMessages.get(id);
   if (list.length > 500) list.splice(0, list.length - 500);
+  saveDiskStoreSoon();
   return msg;
 }
 
 function memoryHistory(roomId) {
   return [...(memoryMessages.get(String(roomId || '').trim()) || [])];
+}
+
+function ensureRoomMeta(roomId, createdBy) {
+  const id = String(roomId || '').trim();
+  if (!id) return null;
+  if (!memoryRoomMeta.has(id)) {
+    memoryRoomMeta.set(id, {
+      createdAt: new Date().toISOString(),
+      createdBy: String(createdBy || '').trim(),
+    });
+    saveDiskStoreSoon();
+  }
+  return memoryRoomMeta.get(id);
+}
+
+async function getRoomCreatedAt(roomId) {
+  const id = String(roomId || '').trim();
+  if (!id) return null;
+
+  if (mongoReady()) {
+    try {
+      const meta = await getMongoRoomMeta(id);
+      if (meta?.createdAt) return new Date(meta.createdAt).toISOString();
+    } catch (_) {}
+  }
+
+  const mem = memoryRoomMeta.get(id);
+  if (mem?.createdAt) return mem.createdAt;
+
+  const hist = memoryHistory(id);
+  if (hist.length) {
+    let min = Infinity;
+    hist.forEach((m) => {
+      const t = new Date(m.time).getTime();
+      if (!Number.isNaN(t) && t < min) min = t;
+    });
+    if (min !== Infinity) return new Date(min).toISOString();
+  }
+
+  return null;
+}
+
+async function getMongoRoomMeta(roomId) {
+  if (!mongoReady()) return null;
+  const id = String(roomId || '').trim();
+  if (!id) return null;
+  const coll = mongoose.connection.db.collection(toSafeCollectionName(id));
+  const doc = await coll.findOne({ _id: ROOM_META_ID });
+  if (doc) return doc;
+  // Legacy: messages-only collection had no meta
+  return null;
+}
+
+/** Ensure a Mongo collection named after the room, with meta (createdAt/createdBy/members). */
+async function ensureRoomInMongo(roomId, createdBy) {
+  if (!mongoReady()) return ensureRoomMeta(roomId, createdBy);
+  const id = String(roomId || '').trim();
+  if (!id) return null;
+  const name = String(createdBy || '').trim();
+  const collName = toSafeCollectionName(id);
+  const db = mongoose.connection.db;
+  await db.createCollection(collName).catch(() => {});
+  const coll = db.collection(collName);
+
+  const existing = await coll.findOne({ _id: ROOM_META_ID });
+  if (!existing) {
+    const createdAt = new Date();
+    const members = name ? [name] : [];
+    await coll.insertOne({
+      _id: ROOM_META_ID,
+      docType: 'room_meta',
+      roomId: id,
+      createdAt,
+      createdBy: name,
+      members,
+    });
+    memoryRoomMeta.set(id, { createdAt: createdAt.toISOString(), createdBy: name });
+    saveDiskStoreSoon();
+    return memoryRoomMeta.get(id);
+  }
+
+  if (name) {
+    await coll.updateOne({ _id: ROOM_META_ID }, { $addToSet: { members: name } });
+  }
+  const meta = {
+    createdAt: existing.createdAt
+      ? new Date(existing.createdAt).toISOString()
+      : new Date().toISOString(),
+    createdBy: String(existing.createdBy || name || '').trim(),
+  };
+  memoryRoomMeta.set(id, meta);
+  saveDiskStoreSoon();
+  return meta;
+}
+
+async function addMemberToMongoRoom(roomId, userName) {
+  if (!mongoReady()) return;
+  const id = String(roomId || '').trim();
+  const name = String(userName || '').trim();
+  if (!id || !name) return;
+  try {
+    const coll = mongoose.connection.db.collection(toSafeCollectionName(id));
+    await coll.updateOne(
+      { _id: ROOM_META_ID },
+      { $addToSet: { members: name }, $setOnInsert: { docType: 'room_meta', roomId: id } },
+      { upsert: false }
+    );
+  } catch (_) {}
 }
 
 function memoryFindMessage(roomId, messageId) {
@@ -51,6 +221,7 @@ function memoryDeleteMessage(roomId, messageId) {
   const idx = list.findIndex((m) => String(m._id) === String(messageId));
   if (idx < 0) return false;
   list.splice(idx, 1);
+  saveDiskStoreSoon();
   return true;
 }
 
@@ -68,26 +239,61 @@ function getRoomMembers(roomId) {
   return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
 }
 
-/** Distinct userName from this room's message collection + online sockets (no separate roster DB). */
+/** Distinct userName from Mongo room meta + messages + local history + online sockets. */
 async function getRoomMembersMerged(roomId) {
   const id = String(roomId || '').trim();
   const online = getRoomMembers(id);
-  const fromMessages = [];
+  const fromMessages = new Set();
+  memoryHistory(id).forEach((m) => {
+    const s = String(m && m.userName ? m.userName : '').trim();
+    if (s) fromMessages.add(s);
+  });
+  const creator = memoryRoomMeta.get(id)?.createdBy;
+  if (creator) fromMessages.add(String(creator).trim());
   try {
-    if (mongoose.connection.readyState === 1 && id) {
-      const collName = toSafeCollectionName(id);
-      const coll = mongoose.connection.db.collection(collName);
-      const raw = await coll.distinct('userName');
+    if (mongoReady() && id) {
+      const coll = mongoose.connection.db.collection(toSafeCollectionName(id));
+      const meta = await coll.findOne({ _id: ROOM_META_ID });
+      if (meta && Array.isArray(meta.members)) {
+        meta.members.forEach((n) => {
+          const s = String(n || '').trim();
+          if (s) fromMessages.add(s);
+        });
+      }
+      if (meta?.createdBy) fromMessages.add(String(meta.createdBy).trim());
+      const raw = await coll.distinct('userName', { docType: { $ne: 'room_meta' } });
       raw.forEach((n) => {
         const s = String(n || '').trim();
-        if (s) fromMessages.push(s);
+        if (s) fromMessages.add(s);
       });
+      // Legacy room_*_messages collections
+      const legacy = legacyCollectionName(id);
+      if (legacy !== toSafeCollectionName(id)) {
+        try {
+          const legacyRaw = await mongoose.connection.db.collection(legacy).distinct('userName');
+          legacyRaw.forEach((n) => {
+            const s = String(n || '').trim();
+            if (s) fromMessages.add(s);
+          });
+        } catch (_) {}
+      }
     }
   } catch (_) {}
-  const merged = [...new Set([...online, ...fromMessages])].sort((a, b) =>
+  const merged = [...new Set([...online, ...fromMessages])].filter(Boolean).sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: 'base' })
   );
   return { members: merged, online };
+}
+
+async function resolveRoomCreatedBy(roomId) {
+  const id = String(roomId || '').trim();
+  if (mongoReady()) {
+    try {
+      const meta = await getMongoRoomMeta(id);
+      if (meta?.createdBy) return String(meta.createdBy).trim();
+    } catch (_) {}
+  }
+  return String(memoryRoomMeta.get(id)?.createdBy || '').trim();
 }
 
 async function broadcastRoomMembers(roomId) {
@@ -95,9 +301,35 @@ async function broadcastRoomMembers(roomId) {
   if (!rid) return;
   try {
     const { members, online } = await getRoomMembersMerged(rid);
-    io.to(rid).emit('room_members', { roomId: rid, members, online });
+    const createdAt = await getRoomCreatedAt(rid);
+    const createdBy = await resolveRoomCreatedBy(rid);
+    // Keep Mongo members list in sync when connected
+    if (mongoReady() && members.length) {
+      try {
+        await mongoose.connection.db.collection(toSafeCollectionName(rid)).updateOne(
+          { _id: ROOM_META_ID },
+          { $addToSet: { members: { $each: members } } }
+        );
+      } catch (_) {}
+    }
+    io.to(rid).emit('room_members', {
+      roomId: rid,
+      members,
+      online,
+      memberCount: members.length,
+      createdAt: createdAt || null,
+      createdBy: createdBy || '',
+    });
   } catch (_) {
-    io.to(rid).emit('room_members', { roomId: rid, members: getRoomMembers(rid), online: getRoomMembers(rid) });
+    const online = getRoomMembers(rid);
+    io.to(rid).emit('room_members', {
+      roomId: rid,
+      members: online,
+      online,
+      memberCount: online.length,
+      createdAt: null,
+      createdBy: '',
+    });
   }
 }
 
@@ -106,10 +338,32 @@ app.get('/api/room/:roomId/members', async (req, res) => {
   if (!roomId) return res.status(400).json({ ok: false, members: [] });
   try {
     const { members, online } = await getRoomMembersMerged(roomId);
-    res.json({ ok: true, roomId, members, online });
+    const createdAt = await getRoomCreatedAt(roomId);
+    const createdBy = await resolveRoomCreatedBy(roomId);
+    res.json({
+      ok: true,
+      roomId,
+      members,
+      online,
+      memberCount: members.length,
+      createdAt: createdAt || null,
+      createdBy: createdBy || '',
+      mongo: mongoReady(),
+      collection: toSafeCollectionName(roomId),
+    });
   } catch (_) {
     const online = getRoomMembers(roomId);
-    res.json({ ok: true, roomId, members: online, online });
+    const createdAt = await getRoomCreatedAt(roomId);
+    res.json({
+      ok: true,
+      roomId,
+      members: online,
+      online,
+      memberCount: online.length,
+      createdAt: createdAt || null,
+      createdBy: '',
+      mongo: mongoReady(),
+    });
   }
 });
 
@@ -298,10 +552,28 @@ function redactMongoUri(uri) {
   }
 }
 
+function withAuthSource(uri) {
+  try {
+    const u = new URL(uri);
+    if (!u.searchParams.has('authSource')) u.searchParams.set('authSource', 'admin');
+    return u.toString();
+  } catch {
+    return uri;
+  }
+}
+
 async function connectMongoWithFallback() {
   const tried = [];
-  const candidates = [MONGO_URI, LOCAL_MONGO_URI].filter(Boolean);
+  const candidates = [];
+  if (MONGO_URI) {
+    candidates.push(MONGO_URI);
+    candidates.push(withAuthSource(MONGO_URI));
+  }
+  if (LOCAL_MONGO_URI) candidates.push(LOCAL_MONGO_URI);
+  const seen = new Set();
   for (const uri of candidates) {
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
     tried.push(uri);
     try {
       await mongoose.connect(uri, { serverSelectionTimeoutMS: 7000 });
@@ -320,19 +592,30 @@ async function connectMongoWithFallback() {
       } catch {}
     }
   }
-  console.error('MongoDB unavailable. Tried:', tried.map(redactMongoUri).join(' , '));
+  console.error(
+    'MongoDB unavailable — using local disk store for chat history/members. Fix MONGO_URI (Atlas Database Access password) to use cloud data. Tried:',
+    tried.map(redactMongoUri).join(' , ')
+  );
 }
 
 connectMongoWithFallback();
 
-// Message model
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    mongo: mongoReady(),
+    store: fs.existsSync(STORE_PATH),
+  });
+});
+
+// Message model (stored inside each room's collection)
 const messageSchema = new mongoose.Schema({
   roomId: { type: String, index: true },
+  docType: { type: String, default: 'message' },
   text: String,
   userName: String,
   userLang: String,
   time: { type: Date, default: Date.now },
-  // edited flag optional for clients
   attachment: mongoose.Schema.Types.Mixed,
   edited: { type: Boolean, default: false },
 });
@@ -398,22 +681,33 @@ app.get('/api/rooms', async (req, res) => {
     const cols = await db.listCollections({}, { nameOnly: true }).toArray();
     const roomCollections = cols
       .map((c) => c.name)
-      .filter((name) => name.startsWith('room_') && name.endsWith('_messages'));
+      .filter((name) => {
+        if (!name || RESERVED_COLLECTIONS.has(name)) return false;
+        if (name.startsWith('system.')) return false;
+        return true;
+      });
 
     const rooms = await Promise.all(
       roomCollections.map(async (collectionName) => {
-        const roomId = collectionName.slice(5, -9); // remove "room_" and "_messages"
+        let roomId = collectionName;
+        if (collectionName.startsWith('room_') && collectionName.endsWith('_messages')) {
+          roomId = collectionName.slice(5, -9);
+        }
         let lastUsedAt = null;
         try {
           const last = await db
             .collection(collectionName)
-            .find({}, { projection: { time: 1 } })
+            .find({ docType: { $ne: 'room_meta' }, time: { $exists: true } }, { projection: { time: 1 } })
             .sort({ time: -1 })
             .limit(1)
             .next();
           lastUsedAt = last?.time || null;
+          if (!lastUsedAt) {
+            const meta = await db.collection(collectionName).findOne({ _id: ROOM_META_ID });
+            lastUsedAt = meta?.createdAt || null;
+          }
         } catch {}
-        return { roomId, lastUsedAt };
+        return { roomId, lastUsedAt, collection: collectionName };
       })
     );
 
@@ -479,32 +773,149 @@ app.patch('/api/rooms/:roomId', async (req, res) => {
   }
 });
 
-function toSafeCollectionName(roomId) {
-  // Mongo collection names cannot contain '\0' and have practical limits.
-  // Keep it deterministic and safe.
+function sanitizeRoomKey(roomId) {
   const base = String(roomId || 'room').trim().toLowerCase();
-  const safe = base.replace(/[^a-z0-9_-]+/g, '_').slice(0, 80) || 'room';
-  return `room_${safe}_messages`;
+  return base.replace(/[^a-z0-9_-]+/g, '_').slice(0, 80) || 'room';
+}
+
+/** Collection named after the room (e.g. room "ghcyy" → collection "ghcyy"). */
+function toSafeCollectionName(roomId) {
+  const safe = sanitizeRoomKey(roomId);
+  if (RESERVED_COLLECTIONS.has(safe) || safe.startsWith('system')) return `room_${safe}`;
+  return safe;
+}
+
+/** Older naming scheme — still read for migration. */
+function legacyCollectionName(roomId) {
+  return `room_${sanitizeRoomKey(roomId)}_messages`;
 }
 
 function getRoomMessageModel(roomId) {
   const collection = toSafeCollectionName(roomId);
-  // Reuse the same model if already compiled
   const modelName = `Message_${collection}`;
   return mongoose.models[modelName] || mongoose.model(modelName, messageSchema, collection);
 }
 
+/** Live voice calls: roomId -> { startedAt, peers: Map(socketId -> { userName }) } */
+const voiceCalls = new Map();
+
+function voiceCallPeerList(roomId) {
+  const call = voiceCalls.get(roomId);
+  if (!call) return [];
+  return [...call.peers.entries()].map(([socketId, info]) => ({
+    socketId,
+    userName: info.userName,
+  }));
+}
+
+function leaveVoiceCall(socket) {
+  const roomId = socket.voiceCallRoomId;
+  if (!roomId) return;
+  const call = voiceCalls.get(roomId);
+  socket.voiceCallRoomId = null;
+  if (!call) return;
+  call.peers.delete(socket.id);
+  socket.to(roomId).emit('voice_call_peer_left', { roomId, socketId: socket.id });
+  if (call.peers.size === 0) {
+    voiceCalls.delete(roomId);
+  } else {
+    io.to(roomId).emit('voice_call_state', {
+      roomId,
+      startedAt: call.startedAt,
+      peers: voiceCallPeerList(roomId),
+    });
+  }
+}
+
 io.on('connection', (socket) => {
+  socket.on('voice_call_join', ({ roomId, userName } = {}) => {
+    const rid = String(roomId || socket.roomId || '').trim();
+    const name = String(userName || socket.userName || 'User').trim() || 'User';
+    if (!rid) {
+      socket.emit('voice_call_error', { error: 'Join a chat room first.' });
+      return;
+    }
+    if (socket.voiceCallRoomId && socket.voiceCallRoomId !== rid) {
+      leaveVoiceCall(socket);
+    }
+    if (!voiceCalls.has(rid)) {
+      voiceCalls.set(rid, { startedAt: Date.now(), peers: new Map() });
+    }
+    const call = voiceCalls.get(rid);
+    const others = voiceCallPeerList(rid).filter((p) => p.socketId !== socket.id);
+    call.peers.set(socket.id, { userName: name });
+    socket.voiceCallRoomId = rid;
+    socket.emit('voice_call_joined', {
+      roomId: rid,
+      startedAt: call.startedAt,
+      selfId: socket.id,
+      peers: voiceCallPeerList(rid),
+      existingPeers: others,
+    });
+    socket.to(rid).emit('voice_call_peer_joined', {
+      roomId: rid,
+      peer: { socketId: socket.id, userName: name },
+      startedAt: call.startedAt,
+      peers: voiceCallPeerList(rid),
+    });
+  });
+
+  socket.on('voice_call_leave', () => {
+    leaveVoiceCall(socket);
+  });
+
+  socket.on('voice_call_signal', ({ roomId, to, data } = {}) => {
+    const rid = String(roomId || socket.voiceCallRoomId || '').trim();
+    const target = String(to || '').trim();
+    if (!rid || !target || !data) return;
+    const call = voiceCalls.get(rid);
+    if (!call || !call.peers.has(socket.id) || !call.peers.has(target)) return;
+    io.to(target).emit('voice_call_signal', {
+      roomId: rid,
+      from: socket.id,
+      fromName: call.peers.get(socket.id)?.userName || socket.userName || 'User',
+      data,
+    });
+  });
+
+  socket.on('voice_call_mute', ({ muted } = {}) => {
+    const rid = socket.voiceCallRoomId;
+    if (!rid) return;
+    const call = voiceCalls.get(rid);
+    if (!call || !call.peers.has(socket.id)) return;
+    socket.to(rid).emit('voice_call_peer_mute', {
+      roomId: rid,
+      socketId: socket.id,
+      muted: !!muted,
+    });
+  });
+
   socket.on('room_members_request', async (payload, ack) => {
     const requested = String(payload && payload.roomId ? payload.roomId : '').trim();
     const roomId = requested || String(socket.roomId || '').trim();
-    let out = { roomId: roomId || requested, members: [], online: [] };
+    let out = { roomId: roomId || requested, members: [], online: [], memberCount: 0, createdAt: null, createdBy: '' };
     try {
       const merged = await getRoomMembersMerged(roomId);
-      out = { roomId: roomId || requested, members: merged.members, online: merged.online };
+      const createdAt = await getRoomCreatedAt(roomId);
+      const createdBy = await resolveRoomCreatedBy(roomId);
+      out = {
+        roomId: roomId || requested,
+        members: merged.members,
+        online: merged.online,
+        memberCount: merged.members.length,
+        createdAt: createdAt || null,
+        createdBy: createdBy || '',
+      };
     } catch (_) {
       const online = getRoomMembers(roomId);
-      out = { roomId: roomId || requested, members: online, online };
+      out = {
+        roomId: roomId || requested,
+        members: online,
+        online,
+        memberCount: online.length,
+        createdAt: null,
+        createdBy: '',
+      };
     }
     socket.emit('room_members', out);
     if (typeof ack === 'function') {
@@ -522,20 +933,26 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     users.set(socket.id, { roomId, userName: socket.userName, userLang: socket.userLang });
 
-    // Load messages for this room from MongoDB (last 6 months only), else memory
+    try {
+      await ensureRoomInMongo(roomId, socket.userName);
+      await addMemberToMongoRoom(roomId, socket.userName);
+    } catch (err) {
+      console.error('ensureRoomInMongo:', err.message);
+      ensureRoomMeta(roomId, socket.userName);
+    }
+
+    // Load messages for this room from MongoDB (last 6 months only), else memory/disk
     try {
       if (!mongoReady()) {
         socket.emit('history', memoryHistory(roomId));
       } else {
-        // Ensure collection exists for this room id
         const collectionName = toSafeCollectionName(roomId);
         await mongoose.connection.createCollection(collectionName).catch(() => {});
         const RoomMessage = getRoomMessageModel(roomId);
         const cutoff = new Date();
         cutoff.setMonth(cutoff.getMonth() - 6);
-        // Query by collection (already room-specific). Keep 6-month window,
-        // and support both Date and legacy ISO-string "time" values.
-        const history = await RoomMessage.find({
+        let history = await RoomMessage.find({
+          docType: { $ne: 'room_meta' },
           $or: [
             { time: { $gte: cutoff } },
             { time: { $type: 'string', $gte: cutoff.toISOString() } },
@@ -543,6 +960,39 @@ io.on('connection', (socket) => {
         })
           .sort({ time: 1 })
           .lean();
+
+        // Fall back to legacy room_*_messages if new collection has no chats yet
+        if (!history.length) {
+          const legacy = legacyCollectionName(roomId);
+          try {
+            const exists = await mongoose.connection.db
+              .listCollections({ name: legacy }, { nameOnly: true })
+              .hasNext();
+            if (exists) {
+              history = await mongoose.connection.db
+                .collection(legacy)
+                .find({
+                  $or: [
+                    { time: { $gte: cutoff } },
+                    { time: { $type: 'string', $gte: cutoff.toISOString() } },
+                  ],
+                })
+                .sort({ time: 1 })
+                .toArray();
+            }
+          } catch (_) {}
+        }
+
+        // Merge any local-only messages not yet in Mongo
+        const local = memoryHistory(roomId);
+        if (local.length) {
+          const seen = new Set(history.map((m) => String(m._id)));
+          local.forEach((m) => {
+            if (!seen.has(String(m._id))) history.push(m);
+          });
+          history.sort((a, b) => new Date(a.time) - new Date(b.time));
+        }
+
         socket.emit('history', history);
       }
     } catch (err) {
@@ -561,6 +1011,7 @@ io.on('connection', (socket) => {
     if (!name) return;
     if (!mail) {
       memoryEmails.delete(name);
+      saveDiskStoreSoon();
       if (!mongoReady()) return;
       try {
         await Email.deleteOne({ userName: name });
@@ -568,6 +1019,7 @@ io.on('connection', (socket) => {
       return;
     }
     memoryEmails.set(name, mail);
+    saveDiskStoreSoon();
     if (!mongoReady()) return;
     try {
       await Email.updateOne(
@@ -625,6 +1077,7 @@ io.on('connection', (socket) => {
       const clientEmail = String(payload.email || '').trim().toLowerCase();
       if (clientEmail.includes('@')) {
         memoryEmails.set(resolvedName, clientEmail);
+        saveDiskStoreSoon();
         hasIdentity = true;
       }
     }
@@ -655,6 +1108,7 @@ io.on('connection', (socket) => {
     const RoomMessage = getRoomMessageModel(roomId);
     const msgDoc = new RoomMessage({
       roomId,
+      docType: 'message',
       text: msgObj.text,
       userName: resolvedName,
       userLang: msgObj.userLang,
@@ -663,6 +1117,7 @@ io.on('connection', (socket) => {
 
     try {
       const saved = await msgDoc.save();
+      await addMemberToMongoRoom(roomId, resolvedName);
       io.to(roomId).emit('message', saved.toObject());
       void broadcastRoomMembers(roomId).catch(() => {});
     } catch (err) {
@@ -835,12 +1290,14 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     const prev = users.get(socket.id);
+    leaveVoiceCall(socket);
     users.delete(socket.id);
     if (prev?.roomId) void broadcastRoomMembers(prev.roomId).catch(() => {});
   });
 });
 
 const START_PORT = Number(process.env.PORT) || 3000;
+
 const MAX_PORT_TRIES = 20;
 
 function listenWithFallback(port, attemptsLeft) {

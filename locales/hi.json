@@ -83,5 +83,18 @@
   "saveEdit": "सहेजें",
   "cancelEdit": "रद्द करें",
   "edited": "संपादित",
-  "voiceMenu": "आवाज़"
+  "voiceMenu": "आवाज़",
+  "roomDetails": "रूम विवरण",
+  "roomCreated": "बनाया गया",
+  "roomMemberCount": "कुल सदस्य",
+  "roomMemberNames": "सदस्यों के नाम",
+  "roomCreatedBy": "बनाया गया द्वारा",
+  "liveVoiceCall": "लाइव वॉइस कॉल",
+  "muteMic": "म्यूट",
+  "unmuteMic": "अनम्यूट",
+  "leaveCall": "छोड़ें",
+  "voiceCallConnecting": "वॉइस कॉल से जुड़ रहे हैं…",
+  "voiceCallUnsupported": "इस ब्राउज़र में लाइव वॉइस कॉल समर्थित नहीं है।",
+  "voiceCallNeedServer": "पहले चैट सर्वर से कनेक्ट करें।",
+  "joinRoomFirst": "पहले एक रूम जॉइन करें।"
 }

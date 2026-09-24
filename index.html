@@ -91,7 +91,7 @@
             <h2 id="welcomeTitle" class="main-top-bar-title">Nexova</h2>
           </div>
           <div class="main-top-bar-sub">
-            <button type="button" class="chat-room-badge" id="chatRoomBadge" aria-haspopup="dialog" aria-expanded="false" title="Room members">
+            <button type="button" class="chat-room-badge" id="chatRoomBadge" aria-haspopup="dialog" aria-expanded="false" title="Room details">
               Room
             </button>
           </div>
@@ -157,6 +157,9 @@
                 <button type="button" class="voice-menu-option" id="voiceMsgBtn">
                   <span class="voice-menu-label" id="voiceMsgLabel">Voice message</span>
                 </button>
+                <button type="button" class="voice-menu-option" id="voiceCallBtn">
+                  <span class="voice-menu-label" id="voiceCallLabel">Live voice call</span>
+                </button>
               </div>
             </div>
             <div class="composer-attach-wrap">
@@ -191,10 +194,42 @@
   <div class="room-members-backdrop" id="roomMembersBackdrop" hidden aria-hidden="true">
     <div class="room-members-dialog" role="dialog" aria-modal="true" aria-labelledby="roomMembersTitle" tabindex="-1">
       <header class="room-members-header">
-        <h3 class="room-members-title" id="roomMembersTitle">Room members</h3>
+        <h3 class="room-members-title" id="roomMembersTitle">Room details</h3>
         <button type="button" class="room-members-close" id="roomMembersClose" aria-label="Close">✕</button>
       </header>
+      <div class="room-details-meta" id="roomDetailsMeta">
+        <div class="room-details-row">
+          <span class="room-details-label" id="roomIdDetailLabel">Room</span>
+          <span class="room-details-value" id="roomDetailsId">—</span>
+        </div>
+        <div class="room-details-row">
+          <span class="room-details-label" id="roomCreatedLabel">Created</span>
+          <span class="room-details-value" id="roomDetailsCreated">—</span>
+        </div>
+        <div class="room-details-row">
+          <span class="room-details-label" id="roomCreatedByLabel">Created by</span>
+          <span class="room-details-value" id="roomDetailsCreatedBy">—</span>
+        </div>
+        <div class="room-details-row">
+          <span class="room-details-label" id="roomMemberCountLabel">Members</span>
+          <span class="room-details-value" id="roomDetailsCount">—</span>
+        </div>
+      </div>
+      <h4 class="room-details-subtitle" id="roomMembersSubtitle">Member names</h4>
       <ul class="room-members-list" id="roomMembersList"></ul>
+    </div>
+  </div>
+  <div class="voice-call-overlay" id="voiceCallOverlay" hidden aria-hidden="true">
+    <div class="voice-call-panel" role="dialog" aria-modal="true" aria-labelledby="voiceCallTitle">
+      <header class="voice-call-header">
+        <h3 class="voice-call-title" id="voiceCallTitle">Live voice call</h3>
+        <div class="voice-call-timer" id="voiceCallTimer" aria-live="polite">00:00</div>
+      </header>
+      <div class="voice-call-grid" id="voiceCallGrid"></div>
+      <footer class="voice-call-actions">
+        <button type="button" class="voice-call-action voice-call-mute" id="voiceCallMuteBtn" aria-pressed="false">Mute</button>
+        <button type="button" class="voice-call-action voice-call-leave" id="voiceCallLeaveBtn">Leave</button>
+      </footer>
     </div>
   </div>
   <div class="settings-slider-overlay" id="settingsOverlay" aria-hidden="true"></div>

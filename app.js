@@ -844,6 +844,16 @@ function updateUI() {
   if (voiceDictateLabel) voiceDictateLabel.textContent = t('voiceCommand');
   const voiceMsgLabel = document.getElementById('voiceMsgLabel');
   if (voiceMsgLabel) voiceMsgLabel.textContent = t('voiceMessageRecord');
+  const voiceCallLabel = document.getElementById('voiceCallLabel');
+  if (voiceCallLabel) voiceCallLabel.textContent = t('liveVoiceCall');
+  const voiceCallTitle = document.getElementById('voiceCallTitle');
+  if (voiceCallTitle) voiceCallTitle.textContent = t('liveVoiceCall');
+  const voiceCallMuteBtn = document.getElementById('voiceCallMuteBtn');
+  if (voiceCallMuteBtn) {
+    voiceCallMuteBtn.textContent = voiceCallMuteBtn.getAttribute('aria-pressed') === 'true' ? t('unmuteMic') : t('muteMic');
+  }
+  const voiceCallLeaveBtn = document.getElementById('voiceCallLeaveBtn');
+  if (voiceCallLeaveBtn) voiceCallLeaveBtn.textContent = t('leaveCall');
   document.querySelectorAll('.msg-speak-btn').forEach((btn) => {
     btn.setAttribute('aria-label', t('readAloud'));
     btn.title = t('readAloud');
@@ -1349,6 +1359,7 @@ function showChat(roomId) {
 function showWelcome() {
   currentRoomId = null;
   closeRoomMembersModal();
+  if (typeof window.leaveLiveVoiceCall === 'function') window.leaveLiveVoiceCall(true);
   document.getElementById('welcome').hidden = false;
   document.getElementById('chatArea').hidden = true;
   const searchInput = document.getElementById('chatSearchInput');
@@ -1358,6 +1369,37 @@ function showWelcome() {
   }
   if (socket) socket.disconnect();
   socket = null;
+}
+
+function formatRoomCreatedAt(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString([], {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '—';
+  }
+}
+
+function updateRoomDetailsMeta({ roomId, createdAt, memberCount, createdBy }) {
+  const idEl = document.getElementById('roomDetailsId');
+  const createdEl = document.getElementById('roomDetailsCreated');
+  const createdByEl = document.getElementById('roomDetailsCreatedBy');
+  const countEl = document.getElementById('roomDetailsCount');
+  if (idEl) idEl.textContent = roomId || currentRoomId || '—';
+  if (createdEl) createdEl.textContent = formatRoomCreatedAt(createdAt);
+  if (createdByEl) createdByEl.textContent = createdBy ? String(createdBy) : '—';
+  if (countEl) {
+    const n = typeof memberCount === 'number' ? memberCount : '—';
+    countEl.textContent = String(n);
+  }
 }
 
 function renderRoomMembersList(members, onlineList) {
@@ -1412,34 +1454,53 @@ function openRoomMembersModal() {
   const list = document.getElementById('roomMembersList');
   const title = document.getElementById('roomMembersTitle');
   if (!backdrop || !list || !title) return;
-  title.textContent = typeof t === 'function' ? t('roomMembers') : 'Room members';
+  title.textContent = typeof t === 'function' ? t('roomDetails') : 'Room details';
+  const idLabel = document.getElementById('roomIdDetailLabel');
+  const createdLabel = document.getElementById('roomCreatedLabel');
+  const createdByLabel = document.getElementById('roomCreatedByLabel');
+  const countLabel = document.getElementById('roomMemberCountLabel');
+  const membersSub = document.getElementById('roomMembersSubtitle');
+  if (idLabel) idLabel.textContent = t('roomId');
+  if (createdLabel) createdLabel.textContent = t('roomCreated');
+  if (createdByLabel) createdByLabel.textContent = t('roomCreatedBy');
+  if (countLabel) countLabel.textContent = t('roomMemberCount');
+  if (membersSub) membersSub.textContent = t('roomMemberNames');
+
   backdrop.hidden = false;
   backdrop.setAttribute('aria-hidden', 'false');
   const badge = document.getElementById('chatRoomBadge');
   if (badge) badge.setAttribute('aria-expanded', 'true');
 
   const room = String(currentRoomId).trim();
-  // Absolute URL so fetch always hits this app (avoids wrong base path / file://).
+  updateRoomDetailsMeta({
+    roomId: room,
+    createdAt: null,
+    memberCount: myName ? 1 : 0,
+    createdBy: '',
+  });
+
   const apiUrl = new URL(`/api/room/${encodeURIComponent(room)}/members`, window.location.origin).href;
 
-  function paint(members, online) {
-    renderRoomMembersList(
-      Array.isArray(members) ? members : [],
-      Array.isArray(online) ? online : []
-    );
+  function paint(payload) {
+    const members = Array.isArray(payload.members) ? payload.members : [];
+    const online = Array.isArray(payload.online) ? payload.online : [];
+    updateRoomDetailsMeta({
+      roomId: payload.roomId || room,
+      createdAt: payload.createdAt,
+      memberCount: typeof payload.memberCount === 'number' ? payload.memberCount : members.length,
+      createdBy: payload.createdBy || '',
+    });
+    renderRoomMembersList(members, online);
   }
 
-  // Show at least yourself immediately — never leave the user stuck on "Loading…"
-  paint(myName ? [myName] : [], myName ? [myName] : []);
+  paint({ members: myName ? [myName] : [], online: myName ? [myName] : [], memberCount: myName ? 1 : 0, roomId: room });
 
   fetch(apiUrl, { cache: 'no-store', credentials: 'same-origin' })
     .then((res) => res.text())
     .then((text) => {
       try {
         const data = JSON.parse(text);
-        if (data && data.ok && Array.isArray(data.members)) {
-          paint(data.members, data.online);
-        }
+        if (data && data.ok) paint(data);
       } catch (_) {}
     })
     .catch(() => {});
@@ -1460,6 +1521,13 @@ function joinRoom(roomId, userName, create) {
     nameInput.focus();
     nameInput.classList.add('input-error');
     setTimeout(() => nameInput.classList.remove('input-error'), 1200);
+    return;
+  }
+  if (typeof io === 'undefined') {
+    alert(
+      'Cannot join rooms on this Vercel site — the chat server is not running here.\n\n' +
+      'Use http://localhost:3000 after running npm start, or host the Node server on Render/Railway.'
+    );
     return;
   }
   // If Profile email exists, persist mapping (email -> name)
@@ -1488,7 +1556,8 @@ function joinRoom(roomId, userName, create) {
     });
     socket.on('connect_error', () => {
       const status = document.getElementById('voiceStatus');
-      const msg = 'Cannot reach chat server. Run Nexova with npm start (localhost), not a static Vercel site.';
+      const msg =
+        'Cannot reach chat server. On Vercel the backend is not available — use http://localhost:3000 (npm start).';
       if (status) {
         status.hidden = false;
         status.textContent = msg;
@@ -1544,9 +1613,23 @@ function joinRoom(roomId, userName, create) {
     socket.on('room_members', (payload) => {
       const backdrop = document.getElementById('roomMembersBackdrop');
       if (!backdrop || backdrop.hidden) return;
+      if (payload && payload.roomId && String(payload.roomId) !== String(currentRoomId)) return;
+      updateRoomDetailsMeta({
+        roomId: (payload && payload.roomId) || currentRoomId,
+        createdAt: payload && payload.createdAt,
+        memberCount:
+          payload && typeof payload.memberCount === 'number'
+            ? payload.memberCount
+            : (payload && payload.members && payload.members.length) || 0,
+        createdBy: (payload && payload.createdBy) || '',
+      });
       const members = payload && Array.isArray(payload.members) ? payload.members : [];
       const online = payload && Array.isArray(payload.online) ? payload.online : [];
       renderRoomMembersList(members, online);
+    });
+    if (typeof window.wireVoiceCallSocket === 'function') window.wireVoiceCallSocket(socket);
+    socket.on('disconnect', () => {
+      if (typeof window.leaveLiveVoiceCall === 'function') window.leaveLiveVoiceCall(true);
     });
   } else {
     socket.emit('join', { roomId: id, userName: myName, userLang: currentLang });
@@ -2182,6 +2265,399 @@ function init() {
       if (voiceMsgRecording) await stopVoiceMessageRecording();
       else await startVoiceMessageRecording();
     });
+  }
+
+  // —— Live voice call (WebRTC mesh via Socket.io signaling) ——
+  const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ];
+  let voiceCallActive = false;
+  let voiceCallSelfId = null;
+  let voiceCallLocalStream = null;
+  const voiceCallPcs = new Map(); // peerId -> RTCPeerConnection
+  const voiceCallPendingIce = new Map(); // peerId -> RTCIceCandidateInit[]
+  const voiceCallPeerNames = new Map(); // peerId -> userName
+  const voiceCallAudioEls = new Map();
+  let voiceCallStartedAt = 0;
+  let voiceCallTimerId = null;
+  let voiceCallMuted = false;
+
+  function formatCallDuration(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const mm = String(m).padStart(2, '0');
+    const ss = String(s).padStart(2, '0');
+    if (h > 0) return `${h}:${mm}:${ss}`;
+    return `${mm}:${ss}`;
+  }
+
+  function updateVoiceCallTimer() {
+    const el = document.getElementById('voiceCallTimer');
+    if (!el || !voiceCallStartedAt) return;
+    el.textContent = formatCallDuration(Date.now() - voiceCallStartedAt);
+  }
+
+  function callInitials(name) {
+    const parts = String(name || '?').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+
+  function renderVoiceCallTiles() {
+    const grid = document.getElementById('voiceCallGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    const entries = [];
+    if (voiceCallSelfId) {
+      entries.push({ id: voiceCallSelfId, name: myName || 'You', self: true });
+    }
+    voiceCallPeerNames.forEach((name, id) => {
+      if (id === voiceCallSelfId) return;
+      entries.push({ id, name, self: false });
+    });
+    entries.forEach(({ id, name, self }) => {
+      const tile = document.createElement('div');
+      tile.className = 'voice-call-tile' + (self ? ' is-self' : '');
+      if (self && voiceCallMuted) tile.classList.add('is-muted');
+      tile.dataset.socketId = id;
+      const avatar = document.createElement('div');
+      avatar.className = 'voice-call-avatar';
+      avatar.textContent = callInitials(name);
+      const label = document.createElement('div');
+      label.className = 'voice-call-name';
+      label.textContent = name;
+      if (self) {
+        const you = document.createElement('div');
+        you.className = 'voice-call-you';
+        you.textContent = '(' + (typeof t === 'function' ? t('you') : 'You') + ')';
+        label.appendChild(document.createTextNode(' '));
+        label.appendChild(you);
+      }
+      tile.appendChild(avatar);
+      tile.appendChild(label);
+      grid.appendChild(tile);
+    });
+  }
+
+  function showVoiceCallOverlay() {
+    const overlay = document.getElementById('voiceCallOverlay');
+    if (!overlay) return;
+    overlay.hidden = false;
+    overlay.setAttribute('aria-hidden', 'false');
+    const title = document.getElementById('voiceCallTitle');
+    if (title) title.textContent = typeof t === 'function' ? t('liveVoiceCall') : 'Live voice call';
+    renderVoiceCallTiles();
+    updateVoiceCallTimer();
+    if (voiceCallTimerId) clearInterval(voiceCallTimerId);
+    voiceCallTimerId = setInterval(updateVoiceCallTimer, 1000);
+    if (voiceBtn) voiceBtn.classList.add('in-call');
+  }
+
+  function hideVoiceCallOverlay() {
+    const overlay = document.getElementById('voiceCallOverlay');
+    if (overlay) {
+      overlay.hidden = true;
+      overlay.setAttribute('aria-hidden', 'true');
+    }
+    if (voiceCallTimerId) {
+      clearInterval(voiceCallTimerId);
+      voiceCallTimerId = null;
+    }
+    if (voiceBtn) voiceBtn.classList.remove('in-call');
+  }
+
+  async function ensureVoiceCallMic() {
+    if (voiceCallLocalStream) return voiceCallLocalStream;
+    voiceCallLocalStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+      video: false,
+    });
+    return voiceCallLocalStream;
+  }
+
+  function sendVoiceSignal(to, data) {
+    if (!socket || !socket.connected || !currentRoomId) return;
+    socket.emit('voice_call_signal', { roomId: currentRoomId, to, data });
+  }
+
+  async function flushPendingIce(peerId, pc) {
+    const pending = voiceCallPendingIce.get(peerId) || [];
+    voiceCallPendingIce.delete(peerId);
+    for (const cand of pending) {
+      try {
+        await pc.addIceCandidate(cand);
+      } catch (_) {}
+    }
+  }
+
+  async function createVoicePeerConnection(peerId, peerName, isInitiator) {
+    if (voiceCallPcs.has(peerId)) return voiceCallPcs.get(peerId);
+    const stream = await ensureVoiceCallMic();
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    voiceCallPcs.set(peerId, pc);
+    voiceCallPeerNames.set(peerId, peerName || 'Member');
+    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) sendVoiceSignal(peerId, { type: 'ice', candidate: ev.candidate });
+    };
+    pc.ontrack = (ev) => {
+      let audio = voiceCallAudioEls.get(peerId);
+      if (!audio) {
+        audio = document.createElement('audio');
+        audio.autoplay = true;
+        audio.playsInline = true;
+        audio.style.display = 'none';
+        document.body.appendChild(audio);
+        voiceCallAudioEls.set(peerId, audio);
+      }
+      if (ev.streams && ev.streams[0]) audio.srcObject = ev.streams[0];
+      else {
+        const ms = new MediaStream([ev.track]);
+        audio.srcObject = ms;
+      }
+      audio.play().catch(() => {});
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        cleanupVoicePeer(peerId);
+        renderVoiceCallTiles();
+      }
+    };
+
+    if (isInitiator) {
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+      sendVoiceSignal(peerId, { type: 'offer', sdp: pc.localDescription });
+    }
+    renderVoiceCallTiles();
+    return pc;
+  }
+
+  function cleanupVoicePeer(peerId) {
+    const pc = voiceCallPcs.get(peerId);
+    if (pc) {
+      try { pc.close(); } catch (_) {}
+      voiceCallPcs.delete(peerId);
+    }
+    const audio = voiceCallAudioEls.get(peerId);
+    if (audio) {
+      try { audio.srcObject = null; audio.remove(); } catch (_) {}
+      voiceCallAudioEls.delete(peerId);
+    }
+    voiceCallPendingIce.delete(peerId);
+    voiceCallPeerNames.delete(peerId);
+  }
+
+  async function handleVoiceSignal(from, fromName, data) {
+    if (!data || !from) return;
+    let pc = voiceCallPcs.get(from);
+    if (data.type === 'offer') {
+      if (!pc) pc = await createVoicePeerConnection(from, fromName, false);
+      else if (fromName) voiceCallPeerNames.set(from, fromName);
+      await pc.setRemoteDescription(data.sdp);
+      await flushPendingIce(from, pc);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendVoiceSignal(from, { type: 'answer', sdp: pc.localDescription });
+      renderVoiceCallTiles();
+      return;
+    }
+    if (data.type === 'answer') {
+      if (!pc) return;
+      await pc.setRemoteDescription(data.sdp);
+      await flushPendingIce(from, pc);
+      return;
+    }
+    if (data.type === 'ice' && data.candidate) {
+      if (!pc || !pc.remoteDescription) {
+        const list = voiceCallPendingIce.get(from) || [];
+        list.push(data.candidate);
+        voiceCallPendingIce.set(from, list);
+        return;
+      }
+      try {
+        await pc.addIceCandidate(data.candidate);
+      } catch (_) {}
+    }
+  }
+
+  async function leaveLiveVoiceCall(silent) {
+    if (!voiceCallActive && !voiceCallLocalStream) {
+      hideVoiceCallOverlay();
+      return;
+    }
+    if (socket && socket.connected && !silent) {
+      socket.emit('voice_call_leave');
+    }
+    [...voiceCallPcs.keys()].forEach(cleanupVoicePeer);
+    voiceCallPeerNames.clear();
+    if (voiceCallLocalStream) {
+      voiceCallLocalStream.getTracks().forEach((tr) => tr.stop());
+      voiceCallLocalStream = null;
+    }
+    voiceCallActive = false;
+    voiceCallSelfId = null;
+    voiceCallMuted = false;
+    voiceCallStartedAt = 0;
+    const muteBtn = document.getElementById('voiceCallMuteBtn');
+    if (muteBtn) {
+      muteBtn.setAttribute('aria-pressed', 'false');
+      muteBtn.textContent = typeof t === 'function' ? t('muteMic') : 'Mute';
+    }
+    hideVoiceCallOverlay();
+  }
+
+  async function joinLiveVoiceCall() {
+    if (!currentRoomId) {
+      showVoiceStatus(typeof t === 'function' ? t('joinRoomFirst') : 'Join a room first.', 2500);
+      return;
+    }
+    if (!socket || !socket.connected) {
+      showVoiceStatus(typeof t === 'function' ? t('voiceCallNeedServer') : 'Connect to the chat server first.', 3000);
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showVoiceStatus(typeof t === 'function' ? t('voiceCallUnsupported') : 'Live voice calls are not supported here.', 3000);
+      return;
+    }
+    if (voiceCallActive) {
+      showVoiceCallOverlay();
+      return;
+    }
+    if (voiceListening) stopVoiceListening();
+    if (voiceMsgRecording) await stopVoiceMessageRecording();
+    try {
+      await ensureVoiceCallMic();
+    } catch (_) {
+      showVoiceStatus(typeof t === 'function' ? t('voicePermission') : 'Microphone permission needed.', 3500);
+      return;
+    }
+    voiceCallActive = true;
+    voiceCallMuted = false;
+    showVoiceCallOverlay();
+    showVoiceStatus(typeof t === 'function' ? t('voiceCallConnecting') : 'Connecting to voice call…', 2000);
+    socket.emit('voice_call_join', { roomId: currentRoomId, userName: myName });
+  }
+
+  function wireVoiceCallSocket(sock) {
+    if (!sock || sock._nexovaVoiceWired) return;
+    sock._nexovaVoiceWired = true;
+
+    sock.on('voice_call_joined', async (payload) => {
+      if (!payload || String(payload.roomId) !== String(currentRoomId)) return;
+      voiceCallActive = true;
+      voiceCallSelfId = payload.selfId;
+      voiceCallStartedAt = payload.startedAt || Date.now();
+      voiceCallPeerNames.clear();
+      (payload.peers || []).forEach((p) => {
+        if (p && p.socketId) voiceCallPeerNames.set(p.socketId, p.userName || 'Member');
+      });
+      showVoiceCallOverlay();
+      const existing = payload.existingPeers || [];
+      for (const p of existing) {
+        try {
+          await createVoicePeerConnection(p.socketId, p.userName, true);
+        } catch (err) {
+          console.warn('voice peer failed', err);
+        }
+      }
+      renderVoiceCallTiles();
+    });
+
+    sock.on('voice_call_peer_joined', async (payload) => {
+      if (!voiceCallActive || !payload || String(payload.roomId) !== String(currentRoomId)) return;
+      if (payload.startedAt) voiceCallStartedAt = payload.startedAt;
+      const peer = payload.peer;
+      if (peer && peer.socketId && peer.socketId !== voiceCallSelfId) {
+        voiceCallPeerNames.set(peer.socketId, peer.userName || 'Member');
+        // Existing peers wait for offer from the new joiner
+        renderVoiceCallTiles();
+      }
+    });
+
+    sock.on('voice_call_peer_left', (payload) => {
+      if (!payload) return;
+      cleanupVoicePeer(payload.socketId);
+      renderVoiceCallTiles();
+    });
+
+    sock.on('voice_call_signal', async (payload) => {
+      if (!voiceCallActive || !payload || String(payload.roomId) !== String(currentRoomId)) return;
+      try {
+        await handleVoiceSignal(payload.from, payload.fromName, payload.data);
+      } catch (err) {
+        console.warn('voice signal error', err);
+      }
+    });
+
+    sock.on('voice_call_peer_mute', (payload) => {
+      if (!payload) return;
+      const tile = document.querySelector(`.voice-call-tile[data-socket-id="${payload.socketId}"]`);
+      if (tile) tile.classList.toggle('is-muted', !!payload.muted);
+    });
+
+    sock.on('voice_call_error', (payload) => {
+      showVoiceStatus((payload && payload.error) || 'Voice call failed.', 3000);
+      leaveLiveVoiceCall(true);
+    });
+
+    sock.on('voice_call_state', (payload) => {
+      if (!voiceCallActive || !payload) return;
+      if (payload.startedAt) voiceCallStartedAt = payload.startedAt;
+      if (Array.isArray(payload.peers)) {
+        const keep = new Set(payload.peers.map((p) => p.socketId));
+        [...voiceCallPeerNames.keys()].forEach((id) => {
+          if (id !== voiceCallSelfId && !keep.has(id)) cleanupVoicePeer(id);
+        });
+        payload.peers.forEach((p) => {
+          if (p && p.socketId) voiceCallPeerNames.set(p.socketId, p.userName || 'Member');
+        });
+        renderVoiceCallTiles();
+      }
+    });
+  }
+
+  // expose for socket disconnect / room leave
+  window.leaveLiveVoiceCall = leaveLiveVoiceCall;
+  window.wireVoiceCallSocket = wireVoiceCallSocket;
+
+  const voiceCallBtn = document.getElementById('voiceCallBtn');
+  if (voiceCallBtn) {
+    voiceCallBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const menu = document.getElementById('voiceMenu');
+      if (menu) menu.hidden = true;
+      if (voiceBtn) voiceBtn.setAttribute('aria-expanded', 'false');
+      await joinLiveVoiceCall();
+    });
+  }
+
+  const voiceCallMuteBtnEl = document.getElementById('voiceCallMuteBtn');
+  if (voiceCallMuteBtnEl) {
+    voiceCallMuteBtnEl.addEventListener('click', () => {
+      if (!voiceCallLocalStream) return;
+      voiceCallMuted = !voiceCallMuted;
+      voiceCallLocalStream.getAudioTracks().forEach((tr) => {
+        tr.enabled = !voiceCallMuted;
+      });
+      voiceCallMuteBtnEl.setAttribute('aria-pressed', voiceCallMuted ? 'true' : 'false');
+      voiceCallMuteBtnEl.textContent = voiceCallMuted
+        ? (typeof t === 'function' ? t('unmuteMic') : 'Unmute')
+        : (typeof t === 'function' ? t('muteMic') : 'Mute');
+      if (socket && socket.connected) socket.emit('voice_call_mute', { muted: voiceCallMuted });
+      renderVoiceCallTiles();
+    });
+  }
+
+  const voiceCallLeaveBtnEl = document.getElementById('voiceCallLeaveBtn');
+  if (voiceCallLeaveBtnEl) {
+    voiceCallLeaveBtnEl.addEventListener('click', () => leaveLiveVoiceCall(false));
   }
 
   const muteRoomBtn = document.getElementById('muteRoomBtn');
